@@ -28,7 +28,7 @@ self.onmessage = (event) => {
 };
 
 // マンデルブロ集合の収束判定関数
-function mandelbrot(c_re: number, c_im: number, maxIter: number): number {
+function mandelbrot(c_re: number, c_im: number, maxIter: number) {
   // カルディオイド判定による早期リターン
   const q = Math.pow(c_re - 0.25, 2) + c_im * c_im;
   if (q * (q + (c_re - 0.25)) <= 0.25 * c_im * c_im) {
