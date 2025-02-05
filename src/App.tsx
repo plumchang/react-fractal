@@ -6,7 +6,7 @@ import React, {
   MouseEvent,
 } from "react";
 
-const FractalWorker = new URL("./fractalWorker.ts", import.meta.url);
+const FractalWorker = new URL("./fractalWorker.js", import.meta.url);
 
 interface WorkerMessage {
   startY: number;
