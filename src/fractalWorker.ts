@@ -1,17 +1,6 @@
 /// <reference lib="webworker" />
 
-interface WorkerRequest {
-  width: number;
-  startY: number;
-  endY: number;
-  zoom: number;
-  offsetX: number;
-  offsetY: number;
-  maxIter: number;
-}
-
-// Worker 内でメッセージを受信
-self.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
+self.onmessage = (event) => {
   const { width, startY, endY, zoom, offsetX, offsetY, maxIter } = event.data;
   const chunkHeight = endY - startY;
   const imageData = new Uint8ClampedArray(width * chunkHeight * 4);
@@ -23,10 +12,10 @@ self.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
       const iter = mandelbrot(c_re, c_im, maxIter);
       const idx = ((y - startY) * width + x) * 4;
       if (iter < maxIter) {
-        imageData[idx] = iter * 2; // R
-        imageData[idx + 1] = iter * 5; // G
-        imageData[idx + 2] = iter * 3; // B
-        imageData[idx + 3] = 255; // A
+        imageData[idx] = iter * 2;
+        imageData[idx + 1] = iter * 5;
+        imageData[idx + 2] = iter * 3;
+        imageData[idx + 3] = 255;
       } else {
         imageData[idx] = 0;
         imageData[idx + 1] = 0;
@@ -35,12 +24,8 @@ self.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
       }
     }
   }
-  // 結果をメインスレッドへ送信 (transferable オブジェクトとして)
-  (self as DedicatedWorkerGlobalScope).postMessage(
-    { startY, chunkData: imageData.buffer },
-    [imageData.buffer]
-  );
-});
+  self.postMessage({ startY, chunkData: imageData.buffer }, [imageData.buffer]);
+};
 
 // マンデルブロ集合の収束判定関数
 function mandelbrot(c_re: number, c_im: number, maxIter: number): number {
