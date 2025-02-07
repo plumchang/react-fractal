@@ -4,6 +4,7 @@ import React, {
   useEffect,
   useCallback,
   MouseEvent,
+  TouchEvent,
 } from "react";
 
 const FractalWorker = new URL("./fractalWorker.js", import.meta.url);
@@ -23,6 +24,7 @@ const App: React.FC = () => {
     x: 0,
     y: 0,
   });
+  const [lastTouchDistance, setLastTouchDistance] = useState<number>(0);
   const workers = useRef<Worker[]>([]);
 
   // フラクタル描画処理（Web Worker 4 つによる並列計算）
@@ -108,6 +110,85 @@ const App: React.FC = () => {
     setIsDragging(false);
   };
 
+  // タッチ開始時の処理
+  const onTouchStart = (e: TouchEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+
+    if (e.touches.length === 1) {
+      // 単一タッチの場合はドラッグ開始
+      const touch = e.touches[0];
+      const x = touch.clientX - rect.left;
+      const y = touch.clientY - rect.top;
+      setIsDragging(true);
+      setLastMousePos({ x, y });
+    } else if (e.touches.length === 2) {
+      // 2本指タッチの場合はピンチズーム開始
+      const touch1 = e.touches[0];
+      const touch2 = e.touches[1];
+      const distance = Math.hypot(
+        touch2.clientX - touch1.clientX,
+        touch2.clientY - touch1.clientY
+      );
+      setLastTouchDistance(distance);
+    }
+  };
+
+  // タッチ移動時の処理
+  const onTouchMove = (e: TouchEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+
+    if (e.touches.length === 1 && isDragging) {
+      // 単一タッチの場合はパン
+      const touch = e.touches[0];
+      const x = touch.clientX - rect.left;
+      const y = touch.clientY - rect.top;
+      const dx = x - lastMousePos.x;
+      const dy = y - lastMousePos.y;
+      setOffsetX((prev) => prev - dx / zoom);
+      setOffsetY((prev) => prev - dy / zoom);
+      setLastMousePos({ x, y });
+      drawFractal();
+    } else if (e.touches.length === 2) {
+      // 2本指タッチの場合はピンチズーム
+      const touch1 = e.touches[0];
+      const touch2 = e.touches[1];
+      const distance = Math.hypot(
+        touch2.clientX - touch1.clientX,
+        touch2.clientY - touch1.clientY
+      );
+
+      // ピンチズームの中心点を計算
+      const centerX = (touch1.clientX + touch2.clientX) / 2 - rect.left;
+      const centerY = (touch1.clientY + touch2.clientY) / 2 - rect.top;
+
+      if (lastTouchDistance > 0) {
+        const zoomFactor = distance / lastTouchDistance;
+        const newZoom = zoom * zoomFactor;
+
+        if (newZoom >= 50 && newZoom <= 100000) {
+          const dx = centerX / zoom - centerX / newZoom;
+          const dy = centerY / zoom - centerY / newZoom;
+
+          setOffsetX((prev) => prev + dx);
+          setOffsetY((prev) => prev + dy);
+          setZoom(newZoom);
+          drawFractal();
+        }
+      }
+      setLastTouchDistance(distance);
+    }
+  };
+
+  // タッチ終了時の処理
+  const onTouchEnd = () => {
+    setIsDragging(false);
+    setLastTouchDistance(0);
+  };
+
   // 初回レンダリング時および依存値変更時に描画
   useEffect(() => {
     drawFractal();
@@ -149,8 +230,27 @@ const App: React.FC = () => {
     }
   }, [zoom, drawFractal]);
 
+  // ウィンドウサイズ変更時にcanvasサイズを更新
+  useEffect(() => {
+    const handleResize = () => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      drawFractal();
+    };
+
+    // 初期サイズ設定
+    handleResize();
+
+    // リサイズイベントの購読
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
   return (
-    <div>
+    <div style={{ overflow: "hidden", margin: 0, padding: 0 }}>
       <div
         style={{
           position: "absolute",
@@ -158,6 +258,7 @@ const App: React.FC = () => {
           left: 10,
           background: "rgba(255,255,255,0.7)",
           padding: "5px",
+          zIndex: 1,
         }}
       >
         <div>{`X: ${offsetX.toFixed(3)}`}</div>
@@ -166,12 +267,19 @@ const App: React.FC = () => {
       </div>
       <canvas
         ref={canvasRef}
-        width={800}
-        height={600}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
-        style={{ border: "1px solid black" }}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        style={{
+          display: "block",
+          width: "100vw",
+          height: "100vh",
+          border: "none",
+          touchAction: "none",
+        }}
       />
     </div>
   );
