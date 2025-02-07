@@ -169,15 +169,13 @@ const App: React.FC = () => {
         const zoomFactor = distance / lastTouchDistance;
         const newZoom = zoom * zoomFactor;
 
-        if (newZoom >= 50 && newZoom <= 100000) {
-          const dx = centerX / zoom - centerX / newZoom;
-          const dy = centerY / zoom - centerY / newZoom;
+        const dx = centerX / zoom - centerX / newZoom;
+        const dy = centerY / zoom - centerY / newZoom;
 
-          setOffsetX((prev) => prev + dx);
-          setOffsetY((prev) => prev + dy);
-          setZoom(newZoom);
-          drawFractal();
-        }
+        setOffsetX((prev) => prev + dx);
+        setOffsetY((prev) => prev + dy);
+        setZoom(newZoom);
+        drawFractal();
       }
       setLastTouchDistance(distance);
     }
