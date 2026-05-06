@@ -7,8 +7,6 @@ import React, {
   TouchEvent,
 } from "react";
 
-const FractalWorker = new URL("./fractalWorker.ts", import.meta.url);
-
 const NUM_WORKERS = 4;
 const MAX_ITER = 100;
 
@@ -45,7 +43,10 @@ class FractalPool {
 
   constructor() {
     for (let i = 0; i < NUM_WORKERS; i++) {
-      const worker = new Worker(FractalWorker, { type: "module" });
+      const worker = new Worker(
+        new URL("./fractalWorker.ts", import.meta.url),
+        { type: "module" }
+      );
       worker.onmessage = (e: MessageEvent<WorkerResponse>) =>
         this.onMessage(e.data);
       this.workers.push(worker);
