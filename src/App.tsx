@@ -7,11 +7,133 @@ import React, {
   TouchEvent,
 } from "react";
 
-const FractalWorker = new URL("./fractalWorker.js", import.meta.url);
+const FractalWorker = new URL("./fractalWorker.ts", import.meta.url);
 
-interface WorkerMessage {
+const NUM_WORKERS = 4;
+const MAX_ITER = 100;
+
+interface WorkerResponse {
   startY: number;
   chunkData: ArrayBuffer;
+}
+
+interface DrawParams {
+  zoom: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+/**
+ * Worker 4 つを使い回し、in_flight 中の追加リクエストは
+ * 「最後の 1 つだけ」を queued に保留して描画完了後に流す。
+ * Yew 版と同じアーキテクチャに揃え、純粋に言語/ランタイム差を比較できるようにする。
+ */
+class FractalPool {
+  private workers: Worker[] = [];
+  private width = 0;
+  private height = 0;
+  private imgBuf: Uint8ClampedArray = new Uint8ClampedArray();
+  private received = 0;
+  private inFlight = false;
+  private queued: DrawParams | null = null;
+  private canvas: HTMLCanvasElement | null = null;
+  private ctx: CanvasRenderingContext2D | null = null;
+  private frameStart = 0;
+  private frameHistory: number[] = [];
+  private onMetrics: ((m: { frameMs: number; fps: number }) => void) | null =
+    null;
+
+  constructor() {
+    for (let i = 0; i < NUM_WORKERS; i++) {
+      const worker = new Worker(FractalWorker, { type: "module" });
+      worker.onmessage = (e: MessageEvent<WorkerResponse>) =>
+        this.onMessage(e.data);
+      this.workers.push(worker);
+    }
+  }
+
+  setCanvas(canvas: HTMLCanvasElement) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d");
+  }
+
+  setMetricsListener(fn: (m: { frameMs: number; fps: number }) => void) {
+    this.onMetrics = fn;
+  }
+
+  submit(params: DrawParams) {
+    if (this.inFlight) {
+      this.queued = params;
+      return;
+    }
+    if (!this.canvas) return;
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+    if (width === 0 || height === 0) return;
+
+    this.width = width;
+    this.height = height;
+    this.imgBuf = new Uint8ClampedArray(width * height * 4);
+    this.received = 0;
+    this.inFlight = true;
+    this.frameStart = performance.now();
+
+    const chunkSize = Math.floor(height / NUM_WORKERS);
+    for (let i = 0; i < NUM_WORKERS; i++) {
+      const startY = i * chunkSize;
+      const endY = i === NUM_WORKERS - 1 ? height : (i + 1) * chunkSize;
+      this.workers[i].postMessage({
+        width,
+        startY,
+        endY,
+        zoom: params.zoom,
+        offsetX: params.offsetX,
+        offsetY: params.offsetY,
+        maxIter: MAX_ITER,
+      });
+    }
+  }
+
+  private onMessage(data: WorkerResponse) {
+    const chunkArray = new Uint8ClampedArray(data.chunkData);
+    const offset = data.startY * this.width * 4;
+    if (offset + chunkArray.length <= this.imgBuf.length) {
+      this.imgBuf.set(chunkArray, offset);
+    }
+    this.received++;
+
+    if (this.received === NUM_WORKERS) {
+      this.inFlight = false;
+      this.received = 0;
+      if (this.ctx) {
+        const imgData = new ImageData(this.imgBuf, this.width, this.height);
+        this.ctx.putImageData(imgData, 0, 0);
+      }
+
+      const end = performance.now();
+      const frameMs = end - this.frameStart;
+      this.frameHistory.push(end);
+      const cutoff = end - 1000;
+      while (
+        this.frameHistory.length > 0 &&
+        this.frameHistory[0] < cutoff
+      ) {
+        this.frameHistory.shift();
+      }
+      this.onMetrics?.({ frameMs, fps: this.frameHistory.length });
+
+      if (this.queued) {
+        const next = this.queued;
+        this.queued = null;
+        this.submit(next);
+      }
+    }
+  }
+
+  terminate() {
+    this.workers.forEach((w) => w.terminate());
+    this.workers = [];
+  }
 }
 
 const App: React.FC = () => {
@@ -25,71 +147,49 @@ const App: React.FC = () => {
     y: 0,
   });
   const [lastTouchDistance, setLastTouchDistance] = useState<number>(0);
-  const workers = useRef<Worker[]>([]);
+  const poolRef = useRef<FractalPool | null>(null);
+  const [metrics, setMetrics] = useState<{ frameMs: number; fps: number }>({
+    frameMs: 0,
+    fps: 0,
+  });
 
-  // フラクタル描画処理（Web Worker 4 つによる並列計算）
+  // 最新パラメータを ref で参照可能にして、毎回 submit に渡す
+  const paramsRef = useRef<DrawParams>({ zoom, offsetX, offsetY });
+  paramsRef.current = { zoom, offsetX, offsetY };
+
   const drawFractal = useCallback(() => {
+    poolRef.current?.submit(paramsRef.current);
+  }, []);
+
+  // 初回マウントで Pool を生成、アンマウントで terminate
+  useEffect(() => {
+    const pool = new FractalPool();
+    pool.setMetricsListener(setMetrics);
+    poolRef.current = pool;
+
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    // 既存のWorkerをクリーンアップ
-    workers.current?.forEach((worker) => worker.terminate());
-
-    const width = canvas.width;
-    const height = canvas.height;
-    const maxIter = 100;
-    const numWorkers = 4;
-    const chunkSize = Math.floor(height / numWorkers);
-    const imageData = new Uint8ClampedArray(width * height * 4);
-    let workersCompleted = 0;
-
-    // 各 worker からのメッセージ受け取りハンドラ
-    const handleWorkerMessage = (e: MessageEvent<WorkerMessage>) => {
-      const { startY, chunkData } = e.data;
-      const chunkArray = new Uint8ClampedArray(chunkData);
-      // 該当チャンクのデータを全体の imageData にコピー
-      imageData.set(chunkArray, startY * width * 4);
-      workersCompleted++;
-      if (workersCompleted === numWorkers) {
-        const imgData = new ImageData(imageData, width, height);
-        ctx.putImageData(imgData, 0, 0);
-      }
-    };
-
-    // 各チャンク毎に worker を作成して計算を依頼
-    for (let i = 0; i < numWorkers; i++) {
-      const worker = new Worker(FractalWorker);
-      const startY = i * chunkSize;
-      const endY = i === numWorkers - 1 ? height : (i + 1) * chunkSize;
-      worker.onmessage = handleWorkerMessage;
-      worker.postMessage({
-        width,
-        startY,
-        endY,
-        zoom,
-        offsetX,
-        offsetY,
-        maxIter,
-      });
-      workers.current.push(worker);
+    if (canvas) {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      pool.setCanvas(canvas);
     }
-  }, [zoom, offsetX, offsetY]);
+    pool.submit(paramsRef.current);
 
-  // マウスダウン時：ドラッグ開始
+    return () => {
+      pool.terminate();
+      poolRef.current = null;
+    };
+  }, []);
+
   const onMouseDown = (e: MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
     setIsDragging(true);
-    setLastMousePos({ x, y });
+    setLastMousePos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
     e.preventDefault();
   };
 
-  // マウス移動時：ドラッグによるパン
   const onMouseMove = (e: MouseEvent<HTMLCanvasElement>) => {
     if (!isDragging) return;
     const canvas = canvasRef.current;
@@ -105,26 +205,23 @@ const App: React.FC = () => {
     drawFractal();
   };
 
-  // マウスアップ時：ドラッグ終了
   const onMouseUp = () => {
     setIsDragging(false);
   };
 
-  // タッチ開始時の処理
   const onTouchStart = (e: TouchEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
 
     if (e.touches.length === 1) {
-      // 単一タッチの場合はドラッグ開始
       const touch = e.touches[0];
-      const x = touch.clientX - rect.left;
-      const y = touch.clientY - rect.top;
       setIsDragging(true);
-      setLastMousePos({ x, y });
+      setLastMousePos({
+        x: touch.clientX - rect.left,
+        y: touch.clientY - rect.top,
+      });
     } else if (e.touches.length === 2) {
-      // 2本指タッチの場合はピンチズーム開始
       const touch1 = e.touches[0];
       const touch2 = e.touches[1];
       const distance = Math.hypot(
@@ -135,14 +232,12 @@ const App: React.FC = () => {
     }
   };
 
-  // タッチ移動時の処理
   const onTouchMove = (e: TouchEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
 
     if (e.touches.length === 1 && isDragging) {
-      // 単一タッチの場合はパン
       const touch = e.touches[0];
       const x = touch.clientX - rect.left;
       const y = touch.clientY - rect.top;
@@ -153,25 +248,20 @@ const App: React.FC = () => {
       setLastMousePos({ x, y });
       drawFractal();
     } else if (e.touches.length === 2) {
-      // 2本指タッチの場合はピンチズーム
       const touch1 = e.touches[0];
       const touch2 = e.touches[1];
       const distance = Math.hypot(
         touch2.clientX - touch1.clientX,
         touch2.clientY - touch1.clientY
       );
-
-      // ピンチズームの中心点を計算
       const centerX = (touch1.clientX + touch2.clientX) / 2 - rect.left;
       const centerY = (touch1.clientY + touch2.clientY) / 2 - rect.top;
 
       if (lastTouchDistance > 0) {
         const zoomFactor = distance / lastTouchDistance;
         const newZoom = zoom * zoomFactor;
-
         const dx = centerX / zoom - centerX / newZoom;
         const dy = centerY / zoom - centerY / newZoom;
-
         setOffsetX((prev) => prev + dx);
         setOffsetY((prev) => prev + dy);
         setZoom(newZoom);
@@ -181,44 +271,27 @@ const App: React.FC = () => {
     }
   };
 
-  // タッチ終了時の処理
   const onTouchEnd = () => {
     setIsDragging(false);
     setLastTouchDistance(0);
   };
 
-  // 初回レンダリング時および依存値変更時に描画
-  useEffect(() => {
-    drawFractal();
-  }, [drawFractal]);
-
   useEffect(() => {
     const handleWheel = (e: globalThis.WheelEvent) => {
       e.preventDefault();
-
       const canvas = canvasRef.current;
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
-
-      // より正確な座標計算
-      const mouseX = (e.clientX - rect.left) | 0; // 整数化
-      const mouseY = (e.clientY - rect.top) | 0; // 整数化
-
-      // より滑らかなズーム係数
+      const mouseX = (e.clientX - rect.left) | 0;
+      const mouseY = (e.clientY - rect.top) | 0;
       const zoomFactor = Math.pow(0.999, e.deltaY);
       const newZoom = zoom * zoomFactor;
-
-      // 座標計算の精度を改善
       const dx = mouseX / zoom - mouseX / newZoom;
       const dy = mouseY / zoom - mouseY / newZoom;
-
-      // 状態更新をバッチ化
-      requestAnimationFrame(() => {
-        setOffsetX((prev) => prev + dx);
-        setOffsetY((prev) => prev + dy);
-        setZoom(newZoom);
-        drawFractal(); // debounceを削除し、直接描画
-      });
+      setOffsetX((prev) => prev + dx);
+      setOffsetY((prev) => prev + dy);
+      setZoom(newZoom);
+      drawFractal();
     };
 
     const canvas = canvasRef.current;
@@ -228,24 +301,17 @@ const App: React.FC = () => {
     }
   }, [zoom, drawFractal]);
 
-  // ウィンドウサイズ変更時にcanvasサイズを更新
   useEffect(() => {
     const handleResize = () => {
       const canvas = canvasRef.current;
       if (!canvas) return;
-
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
       drawFractal();
     };
-
-    // 初期サイズ設定
-    handleResize();
-
-    // リサイズイベントの購読
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, []);
+  }, [drawFractal]);
 
   return (
     <div style={{ overflow: "hidden", margin: 0, padding: 0 }}>
@@ -262,6 +328,8 @@ const App: React.FC = () => {
         <div>{`X: ${offsetX.toFixed(3)}`}</div>
         <div>{`Y: ${offsetY.toFixed(3)}`}</div>
         <div>{`Zoom: ${(zoom / 200).toFixed(1)}x`}</div>
+        <div>{`Frame: ${metrics.frameMs.toFixed(1)} ms`}</div>
+        <div>{`FPS: ${metrics.fps}`}</div>
       </div>
       <canvas
         ref={canvasRef}
