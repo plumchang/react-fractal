@@ -4,7 +4,7 @@ React + TypeScript + Vite で実装したマンデルブロ集合のリアルタ
 
 姉妹プロジェクト [`yew-fractal`](../yew-fractal) と性能比較するためのサンプルとして作成しました。両アプリの実装と比較考察は以下の Zenn 記事にまとめています。
 
-- 記事: 「Rust(Yew) vs JavaScript(React) — マンデルブロ集合で実測した WebAssembly のリアルな速度差」（公開時に URL を追記）
+- 記事: [Rust(Yew) vs JavaScript(React) — マンデルブロ集合で実測した WebAssembly のリアルな速度差](https://zenn.dev/milabo/articles/rust_yew_vs_react_fractal)
 - デプロイ済みデモ: https://plumchang.github.io/react-fractal/
 
 ## 使い方
